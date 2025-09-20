@@ -1,0 +1,7 @@
+<!-- Template for mounting host directory into VM via virtiofs -->
+<!-- Replace GIT_ROOT_PATH with your actual git repository path -->
+<filesystem type='mount' accessmode='passthrough'>
+  <driver type='virtiofs'/>
+  <source dir='GIT_ROOT_PATH'/>
+  <target dir='gitshare'/>
+</filesystem>
