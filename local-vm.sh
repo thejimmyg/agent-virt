@@ -1,60 +1,126 @@
 #!/bin/bash
 set -e
 
-echo "🚀 Ubuntu 24.04 VM for Podman Testing"
-echo "====================================="
+echo "🚀 Ubuntu 24.04 VM Manager"
+echo "=========================="
 echo ""
 
-# Check arguments
-if [ $# -ne 2 ]; then
-    echo "Usage: $0 BASE_IMAGE_NAME TEST_IMAGE_NAME"
+# Function to show usage
+show_usage() {
+    echo "Usage: $0 BASE_IMAGE_PATH TEST_IMAGE_PATH [OPTIONS]"
     echo ""
     echo "Examples:"
-    echo "  $0 base-ubuntu24-podman.qcow2 test-session1.qcow2"
-    echo "  $0 base-ubuntu24-podman.qcow2 test-feature-x.qcow2"
+    echo "  # Basic usage"
+    echo "  ./local-vm.sh base-ubuntu24.qcow2 test-session1.qcow2"
+    echo ""
+    echo "  # With mounts"
+    echo "  ./local-vm.sh base-ubuntu24.qcow2 test-dev.qcow2 \\"
+    echo "    --mount /home/user/project:myapp \\"
+    echo "    --mount /data/shared:shared"
+    echo ""
+    echo "Options:"
+    echo "  --mount SRC:DST   Mount host directory SRC to /opt/DST in VM"
+    echo "                    DST must be a simple name (no slashes)"
     echo ""
     echo "This script creates a test VM from a base image."
     echo "Use create-base-image.sh first to create base images."
     exit 1
+}
+
+# Check minimum arguments
+if [ $# -lt 2 ]; then
+    show_usage
 fi
 
-BASE_IMAGE_NAME="$1"
-TEST_IMAGE_NAME="$2"
+BASE_IMAGE_PATH="$1"
+TEST_IMAGE_PATH="$2"
+shift 2
 
-# Validate image names
-if [[ ! "$BASE_IMAGE_NAME" =~ \.qcow2$ ]]; then
-    echo "Error: Base image name must end with .qcow2"
+# Parse mount arguments
+declare -a MOUNTS
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --mount)
+            if [ -z "$2" ]; then
+                echo "Error: --mount requires an argument (SRC:DST)"
+                exit 1
+            fi
+            # Validate mount format
+            if ! echo "$2" | grep -q ":"; then
+                echo "Error: --mount format must be SRC:DST"
+                exit 1
+            fi
+            IFS=':' read -r src dst <<< "$2"
+            # Validate dst doesn't contain slashes
+            if echo "$dst" | grep -q "/"; then
+                echo "Error: Mount destination name cannot contain slashes: $dst"
+                echo "DST should be a simple name like 'myapp' or 'shared'"
+                exit 1
+            fi
+            MOUNTS+=("$2")
+            shift 2
+            ;;
+        *)
+            echo "Error: Unknown option: $1"
+            show_usage
+            ;;
+    esac
+done
+
+# Validate image paths
+if [[ ! "$BASE_IMAGE_PATH" =~ \.qcow2$ ]]; then
+    echo "Error: Base image path must end with .qcow2"
     exit 1
 fi
 
-if [[ ! "$TEST_IMAGE_NAME" =~ \.qcow2$ ]]; then
-    echo "Error: Test image name must end with .qcow2"
+if [[ ! "$TEST_IMAGE_PATH" =~ \.qcow2$ ]]; then
+    echo "Error: Test image path must end with .qcow2"
     exit 1
 fi
 
-# Extract VM name from test image (remove .qcow2 extension)
-VM_NAME="${TEST_IMAGE_NAME%.qcow2}"
+# Extract VM name from test image path (basename without .qcow2 extension)
+VM_NAME="$(basename "${TEST_IMAGE_PATH%.qcow2}")"
 VM_MEMORY="4096"
 VM_VCPUS="2"
 
-# Find the git repository root
-GIT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo "")"
-if [ -z "$GIT_ROOT" ] || [ ! -d "$GIT_ROOT/.git" ]; then
-    # Fallback: assume we're in podman/testing/vm/
-    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-    if [[ "$SCRIPT_DIR" == */podman/testing/vm ]]; then
-        GIT_ROOT="${SCRIPT_DIR%/podman/testing/vm}"
-    fi
-    if [ ! -d "$GIT_ROOT/.git" ]; then
-        echo "Error: Not in a git repository. Please run from within the git repo."
-        exit 1
-    fi
-fi
+# Function to normalize mount paths for comparison
+normalize_mount() {
+    local mount_spec="$1"
+    IFS=':' read -r src dst <<< "$mount_spec"
+    # Convert to absolute path and remove trailing slashes
+    src=$(cd "$(dirname "$src")" 2>/dev/null && echo "$(pwd)/$(basename "$src")" || echo "$src")
+    src=${src%/}  # Remove trailing slash
+    echo "$src:$dst"
+}
 
-# Set up image paths
+# Function to create sorted mount signature
+create_mount_signature() {
+    local -n mounts_ref=$1
+    local signature=""
+    local normalized_mounts=()
+
+    # Normalize all mounts
+    for mount in "${mounts_ref[@]}"; do
+        normalized_mounts+=("$(normalize_mount "$mount")")
+    done
+
+    # Sort for consistent comparison
+    IFS=$'\n' sorted_mounts=($(sort <<< "${normalized_mounts[*]}"))
+    unset IFS
+
+    # Create signature
+    for mount in "${sorted_mounts[@]}"; do
+        signature="${signature}${mount}\n"
+    done
+    echo -n "$signature"
+}
+
+# Mount configuration file
+MOUNT_CONFIG_FILE="${TEST_IMAGE_PATH%.qcow2}.vm-mounts"
+
+# Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BASE_IMAGE_PATH="$SCRIPT_DIR/$BASE_IMAGE_NAME"
-TEST_IMAGE_PATH="$SCRIPT_DIR/$TEST_IMAGE_NAME"
+NETWORK_SETUP_DIR="$SCRIPT_DIR/network-setup"
 
 # Colors for output
 RED='\033[0;31m'
@@ -73,28 +139,72 @@ if [ ! -f "$BASE_IMAGE_PATH" ]; then
     log_error "Base image not found: $BASE_IMAGE_PATH"
     echo ""
     echo "Create a base image first:"
-    echo "  ./create-base-image.sh \"$BASE_IMAGE_NAME\""
+    echo "  UBUNTU_ISO=~/Downloads/ubuntu-24.04.3-desktop-amd64.iso ./create-base-image.sh base-ubuntu24.qcow2"
     exit 1
 fi
 
-log_success "Found base image: $BASE_IMAGE_PATH"
+log_success "Found base image: $1"
 
 # Check if test image exists, create it if not
 if [ ! -f "$TEST_IMAGE_PATH" ]; then
     log_info "Creating test image from base..."
+    TARGET_DIR=$(dirname "$TEST_IMAGE_PATH")
+    mkdir -p "$TARGET_DIR"
     if cp "$BASE_IMAGE_PATH" "$TEST_IMAGE_PATH"; then
-        log_success "Test image created: $TEST_IMAGE_PATH"
+        log_success "Test image created: $2"
     else
         log_error "Failed to create test image"
         exit 1
     fi
 else
-    log_info "Using existing test image: $TEST_IMAGE_PATH"
+    log_info "Using existing test image: $2"
 fi
 
-# Check if VM already exists
+# Check if VM already exists and compare mounts
+VM_EXISTS=false
+MOUNTS_CHANGED=false
+RECREATE_REASON=""
+
 if virsh list --all --name | grep -q "^${VM_NAME}$"; then
+    VM_EXISTS=true
     log_info "VM '$VM_NAME' already exists"
+
+    # Check if mounts have changed
+    CURRENT_MOUNT_SIG=$(create_mount_signature MOUNTS)
+    if [ -f "$MOUNT_CONFIG_FILE" ]; then
+        STORED_MOUNT_SIG=$(cat "$MOUNT_CONFIG_FILE")
+        if [ "$CURRENT_MOUNT_SIG" != "$STORED_MOUNT_SIG" ]; then
+            MOUNTS_CHANGED=true
+            RECREATE_REASON="mount configuration changed"
+        fi
+    else
+        # No stored config but VM exists - treat as changed if we have mounts
+        if [ ${#MOUNTS[@]} -gt 0 ]; then
+            MOUNTS_CHANGED=true
+            RECREATE_REASON="no previous mount configuration found"
+        fi
+    fi
+
+    if [ "$MOUNTS_CHANGED" = true ]; then
+        log_info "Mount configuration has changed ($RECREATE_REASON)"
+        log_info "Recreating VM to apply new mount configuration..."
+
+        # Stop and remove existing VM
+        if virsh list --name | grep -q "^${VM_NAME}$"; then
+            log_info "Stopping running VM..."
+            virsh destroy "$VM_NAME" 2>/dev/null || true
+        fi
+
+        log_info "Removing VM definition (preserving disk)..."
+        virsh undefine "$VM_NAME" 2>/dev/null || true
+
+        # Clear the exists flag so we recreate
+        VM_EXISTS=false
+    fi
+fi
+
+if [ "$VM_EXISTS" = true ]; then
+    log_info "VM '$VM_NAME' exists with matching mount configuration"
 
     # Check if it's running
     if virsh list --name | grep -q "^${VM_NAME}$"; then
@@ -107,7 +217,7 @@ if virsh list --all --name | grep -q "^${VM_NAME}$"; then
 
         # Launch virt-viewer for already running VM
         log_info "Launching virt-viewer to connect to running VM..."
-        if command -v virt-viewer; then
+        if command -v virt-viewer >/dev/null 2>&1; then
             if virt-viewer "$VM_NAME" &
             then
                 VIEWER_PID=$!
@@ -120,6 +230,35 @@ if virsh list --all --name | grep -q "^${VM_NAME}$"; then
             log_warning "virt-viewer not found"
             echo "   Install with: sudo apt install virt-viewer"
         fi
+
+        # Show mount status
+        echo ""
+        echo "📁 Mount Instructions (persistent across reboots):"
+        echo ""
+        echo "1. Add all mounts to fstab:"
+        echo "sudo tee -a /etc/fstab << 'EOF'"
+        echo "network-setup /opt/network-setup virtiofs defaults 0 0"
+        if [ ${#MOUNTS[@]} -gt 0 ]; then
+            for mount in "${MOUNTS[@]}"; do
+                IFS=':' read -r src dst <<< "$mount"
+                echo "$dst /opt/$dst virtiofs defaults 0 0"
+            done
+        fi
+        echo "EOF"
+        echo ""
+        echo "2. Create directories and mount all:"
+        echo -n "sudo mkdir -p /opt/network-setup"
+        if [ ${#MOUNTS[@]} -gt 0 ]; then
+            for mount in "${MOUNTS[@]}"; do
+                IFS=':' read -r src dst <<< "$mount"
+                echo -n " /opt/$dst"
+            done
+        fi
+        echo ""
+        echo "sudo mount -a"
+        echo ""
+        echo "3. Run network setup:"
+        echo "sudo /opt/network-setup/network-setup.sh"
         echo ""
         exit 0
     else
@@ -139,7 +278,7 @@ if virsh list --all --name | grep -q "^${VM_NAME}$"; then
 
         # Launch virt-viewer for restarted VM
         log_info "Launching virt-viewer to connect to VM..."
-        if command -v virt-viewer; then
+        if command -v virt-viewer >/dev/null 2>&1; then
             if virt-viewer "$VM_NAME" &
             then
                 VIEWER_PID=$!
@@ -153,10 +292,34 @@ if virsh list --all --name | grep -q "^${VM_NAME}$"; then
             echo "   Install with: sudo apt install virt-viewer"
         fi
 
+        # Show mount status
         echo ""
-        echo "Mount git repository inside VM:"
-        echo "  mkdir ~/git"
-        echo "  sudo mount -t virtiofs gitshare ~/git"
+        echo "📁 Mount Instructions (persistent across reboots):"
+        echo ""
+        echo "1. Add all mounts to fstab:"
+        echo "sudo tee -a /etc/fstab << 'EOF'"
+        echo "network-setup /opt/network-setup virtiofs defaults 0 0"
+        if [ ${#MOUNTS[@]} -gt 0 ]; then
+            for mount in "${MOUNTS[@]}"; do
+                IFS=':' read -r src dst <<< "$mount"
+                echo "$dst /opt/$dst virtiofs defaults 0 0"
+            done
+        fi
+        echo "EOF"
+        echo ""
+        echo "2. Create directories and mount all:"
+        echo -n "sudo mkdir -p /opt/network-setup"
+        if [ ${#MOUNTS[@]} -gt 0 ]; then
+            for mount in "${MOUNTS[@]}"; do
+                IFS=':' read -r src dst <<< "$mount"
+                echo -n " /opt/$dst"
+            done
+        fi
+        echo ""
+        echo "sudo mount -a"
+        echo ""
+        echo "3. Run network setup:"
+        echo "sudo /opt/network-setup/network-setup.sh"
         echo ""
         exit 0
     fi
@@ -166,7 +329,7 @@ fi
 log_info "Creating new VM '$VM_NAME' from test image"
 
 # Quick dependency check
-if ! command -v virt-install || ! command -v virsh; then
+if ! command -v virt-install >/dev/null 2>&1 || ! command -v virsh >/dev/null 2>&1; then
     log_error "Missing dependencies. Please install:"
     echo "  sudo apt install -y virt-manager libvirt-daemon-system qemu-kvm"
     echo "  sudo usermod -a -G libvirt $USER"
@@ -200,44 +363,114 @@ virt-install \
 
 if [ $? -eq 0 ]; then
     log_success "VM '$VM_NAME' created successfully!"
+
+    # Store mount configuration
+    CURRENT_MOUNT_SIG=$(create_mount_signature MOUNTS)
+    echo -n "$CURRENT_MOUNT_SIG" > "$MOUNT_CONFIG_FILE"
+    log_info "Mount configuration saved to $MOUNT_CONFIG_FILE"
 else
     log_error "Failed to create VM"
     exit 1
 fi
 
-# Create virtiofs filesystem mount XML
-log_info "Preparing virtiofs filesystem mount for $GIT_ROOT..."
+# Wait for VM to be fully running
+log_info "Waiting for VM to be fully started..."
+log_info "Checking VM state..."
+VM_READY_TIMEOUT=60
+VM_READY_COUNT=0
 
-cat > /tmp/mount-git.xml << EOF
+while [ $VM_READY_COUNT -lt $VM_READY_TIMEOUT ]; do
+    VM_STATE=$(virsh domstate "$VM_NAME" 2>/dev/null || echo "unknown")
+    if [ "$VM_STATE" = "running" ]; then
+        # VM is running, now check if libvirt can communicate properly
+        if timeout 5 virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
+            log_success "VM is ready for device attachment"
+            break
+        fi
+    fi
+
+    if [ $((VM_READY_COUNT % 10)) -eq 0 ]; then
+        log_info "VM state: $VM_STATE (waiting for ready state...)"
+    fi
+
+    sleep 1
+    VM_READY_COUNT=$((VM_READY_COUNT + 1))
+done
+
+if [ $VM_READY_COUNT -ge $VM_READY_TIMEOUT ]; then
+    log_warning "VM ready timeout reached, proceeding anyway..."
+fi
+
+# Always attach network-setup directory (read-only)
+if [ -d "$NETWORK_SETUP_DIR" ]; then
+    log_info "Attaching network-setup directory (read-only)..."
+
+    MOUNT_XML="/tmp/mount-network-setup.xml"
+    cat > "$MOUNT_XML" << EOF
 <filesystem type='mount' accessmode='passthrough'>
   <driver type='virtiofs'/>
-  <source dir='$GIT_ROOT'/>
-  <target dir='gitshare'/>
+  <source dir='$NETWORK_SETUP_DIR'/>
+  <target dir='network-setup'/>
+  <readonly/>
 </filesystem>
 EOF
 
-# Hot-attach virtiofs filesystem to running VM
-log_info "Hot-attaching virtiofs filesystem to running VM..."
-# Wait for VM to be fully running
-log_info "Waiting for VM to be fully started..."
-sleep 5
-
-# Hot-attach filesystem to running VM (this is the key advantage of virtiofs!)
-log_info "Executing: virsh attach-device $VM_NAME /tmp/mount-git.xml --live --persistent"
-if virsh attach-device "$VM_NAME" /tmp/mount-git.xml --live --persistent; then
-    log_success "virtiofs filesystem hot-attached to running VM!"
-    rm /tmp/mount-git.xml
-else
-    log_warning "Hot-attach failed, trying persistent-only attach..."
-    log_info "Executing: virsh attach-device $VM_NAME /tmp/mount-git.xml --persistent"
-    if virsh attach-device "$VM_NAME" /tmp/mount-git.xml --persistent; then
-        log_success "virtiofs filesystem added (will be available after next reboot)"
-        rm /tmp/mount-git.xml
+    log_info "Executing: virsh attach-device $VM_NAME $MOUNT_XML --live --persistent"
+    if virsh attach-device "$VM_NAME" "$MOUNT_XML" --live --persistent; then
+        log_success "network-setup directory attached as 'network-setup' (read-only)"
     else
-        log_error "Failed to attach virtiofs filesystem"
-        log_info "You can manually add it later with: virsh attach-device $VM_NAME vm/mount-git.xml --live --persistent"
-        rm /tmp/mount-git.xml
+        log_warning "Live attach failed, trying persistent-only..."
+        if virsh attach-device "$VM_NAME" "$MOUNT_XML" --persistent; then
+            log_success "network-setup directory attached (available after reboot) as 'network-setup' (read-only)"
+        else
+            log_error "Failed to attach network-setup directory"
+            cat "$MOUNT_XML"
+        fi
     fi
+    rm -f "$MOUNT_XML"
+else
+    log_warning "network-setup directory not found at $NETWORK_SETUP_DIR"
+fi
+
+# Attach user mounts if specified
+if [ ${#MOUNTS[@]} -gt 0 ]; then
+    log_info "Attaching ${#MOUNTS[@]} mount(s) to VM..."
+
+    for mount in "${MOUNTS[@]}"; do
+        IFS=':' read -r src dst <<< "$mount"
+
+        # Validate host path exists
+        if [ ! -e "$src" ]; then
+            log_warning "Host path does not exist: $src"
+            continue
+        fi
+
+        # Create temporary XML for this mount
+        MOUNT_XML="/tmp/mount-${dst}.xml"
+        cat > "$MOUNT_XML" << EOF
+<filesystem type='mount' accessmode='passthrough'>
+  <driver type='virtiofs'/>
+  <source dir='$src'/>
+  <target dir='$dst'/>
+</filesystem>
+EOF
+
+        log_info "Attaching mount: $src -> $dst (tag: $dst)"
+        log_info "Executing: virsh attach-device $VM_NAME $MOUNT_XML --live --persistent"
+        if virsh attach-device "$VM_NAME" "$MOUNT_XML" --live --persistent; then
+            log_success "Mount attached: $dst (use: sudo mount -t virtiofs $dst /opt/$dst)"
+        else
+            log_warning "Live attach failed for $dst, trying persistent-only..."
+            if virsh attach-device "$VM_NAME" "$MOUNT_XML" --persistent; then
+                log_success "Mount added (available after reboot): $dst (use: sudo mount -t virtiofs $dst /opt/$dst)"
+            else
+                log_error "Failed to attach mount: $dst"
+                cat "$MOUNT_XML"
+            fi
+        fi
+
+        rm -f "$MOUNT_XML"
+    done
 fi
 
 echo ""
@@ -249,9 +482,12 @@ echo "📋 VM Configuration:"
 echo "  Name:        $VM_NAME"
 echo "  Memory:      ${VM_MEMORY}MB"
 echo "  CPUs:        $VM_VCPUS"
-echo "  Base Image:  $BASE_IMAGE_NAME"
-echo "  Test Image:  $TEST_IMAGE_NAME"
+echo "  Base Image:  $1"
+echo "  Test Image:  $2"
 echo "  Network:     NAT (WiFi resilient)"
+if [ ${#MOUNTS[@]} -gt 0 ]; then
+    echo "  Mounts:      ${#MOUNTS[@]} configured"
+fi
 echo ""
 echo "🚀 VM is ready for testing!"
 echo ""
@@ -260,7 +496,7 @@ sleep 8
 echo ""
 echo "1. Connect to VM:"
 log_info "Launching virt-viewer to connect to VM..."
-if command -v virt-viewer; then
+if command -v virt-viewer >/dev/null 2>&1; then
     if virt-viewer "$VM_NAME" &
     then
         VIEWER_PID=$!
@@ -282,13 +518,35 @@ else
     echo "   Or use: virt-manager"
 fi
 echo ""
-echo "2. Inside the VM:"
-echo "   a. Create git directory and mount the host git repository:"
-echo "      mkdir ~/git"
-echo "      sudo mount -t virtiofs gitshare ~/git"
-echo "   b. Run container tests:"
-echo "      cd ~/git/podman/testing"
-echo "      ./local-containers.sh"
+echo "2. Inside the VM (login as vm/vm):"
+echo ""
+echo "   Copy-paste this command to set up persistent mounts:"
+echo ""
+echo "   # Add all mounts to fstab (persistent across reboots)"
+echo "   sudo tee -a /etc/fstab << 'EOF'"
+echo "   network-setup /opt/network-setup virtiofs defaults 0 0"
+if [ ${#MOUNTS[@]} -gt 0 ]; then
+    for mount in "${MOUNTS[@]}"; do
+        IFS=':' read -r src dst <<< "$mount"
+        echo "   $dst /opt/$dst virtiofs defaults 0 0"
+    done
+fi
+echo "   EOF"
+echo ""
+echo "   # Create directories and mount all"
+echo -n "   sudo mkdir -p /opt/network-setup"
+if [ ${#MOUNTS[@]} -gt 0 ]; then
+    for mount in "${MOUNTS[@]}"; do
+        IFS=':' read -r src dst <<< "$mount"
+        echo -n " /opt/$dst"
+    done
+fi
+echo ""
+echo "   sudo mount -a"
+echo ""
+echo "   # Run network setup"
+echo "   sudo /opt/network-setup/network-setup.sh"
+
 echo ""
 echo "💡 Helpful Commands:"
 echo "  Start VM:        virsh start $VM_NAME"
@@ -297,15 +555,9 @@ echo "  Force stop:      virsh destroy $VM_NAME"
 echo "  Delete VM:       virsh undefine $VM_NAME"
 echo "  Delete test img: rm \"$TEST_IMAGE_PATH\""
 echo "  List VMs:        virsh list --all"
-echo "  GUI console:     virt-viewer $VM_NAME"
-echo "  Text console:    virsh console $VM_NAME (Ctrl+] to exit)"
-echo ""
-echo "📁 Host Git Repository:"
-echo "  Available as 'gitshare' mount inside VM"
-echo "  Mount: sudo mount -t virtiofs gitshare ~/git"
 echo ""
 echo "🔄 To recreate test VM:"
 echo "  virsh destroy $VM_NAME && virsh undefine $VM_NAME"
 echo "  rm \"$TEST_IMAGE_PATH\""
-echo "  $0 \"$BASE_IMAGE_NAME\" \"$TEST_IMAGE_NAME\""
+echo "  $0 \"$BASE_IMAGE_PATH\" \"$TEST_IMAGE_PATH\" [--mount options]"
 echo ""
