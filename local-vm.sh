@@ -187,6 +187,26 @@ if virsh list --all --name | grep -q "^${VM_NAME}$"; then
 
     if [ "$MOUNTS_CHANGED" = true ]; then
         log_info "Mount configuration has changed ($RECREATE_REASON)"
+
+        # Check if any mounts have been removed
+        if [ -f "$MOUNT_CONFIG_FILE" ]; then
+            # Extract mount destinations from stored and current signatures
+            STORED_DSTS=$(echo -n "$STORED_MOUNT_SIG" | grep -o '[^:]*$' | sort 2>/dev/null || true)
+            CURRENT_DSTS=$(echo -n "$CURRENT_MOUNT_SIG" | grep -o '[^:]*$' | sort 2>/dev/null || true)
+
+            # Find removed mounts (in stored but not in current)
+            REMOVED_MOUNTS=$(comm -23 <(echo "$STORED_DSTS") <(echo "$CURRENT_DSTS") 2>/dev/null || true)
+
+            if [ -n "$REMOVED_MOUNTS" ]; then
+                log_warning "Detected removed mount(s): $(echo "$REMOVED_MOUNTS" | tr '\n' ' ')"
+                log_warning "You may need to manually edit /etc/fstab in the VM to remove old mount entries"
+                log_warning "Use 'vi /etc/fstab' from the emergency console if needed"
+            else
+                # If we can't detect specific removals, use general warning for any changes
+                log_warning "Mount configuration changed - check /etc/fstab for old entries if needed"
+            fi
+        fi
+
         log_info "Recreating VM to apply new mount configuration..."
 
         # Stop and remove existing VM
@@ -233,10 +253,16 @@ if [ "$VM_EXISTS" = true ]; then
 
         # Show mount status
         echo ""
-        echo "📁 Mount Instructions (persistent across reboots):"
+        if [ "$MOUNTS_CHANGED" = false ] && [ "$VM_EXISTS" = true ]; then
+            echo "📁 Mount Instructions (run if not already configured):"
+        else
+            echo "📁 Mount Instructions (persistent across reboots):"
+        fi
         echo ""
-        echo "1. Add all mounts to fstab:"
+        echo "1. Set up fstab (replaces any previous agent-virt mounts):"
+        echo "sudo sed -i '/# agent-virt mounts/,\$d' /etc/fstab"
         echo "sudo tee -a /etc/fstab << 'EOF'"
+        echo "# agent-virt mounts"
         echo "network-setup /opt/network-setup virtiofs defaults 0 0"
         if [ ${#MOUNTS[@]} -gt 0 ]; then
             for mount in "${MOUNTS[@]}"; do
@@ -245,6 +271,7 @@ if [ "$VM_EXISTS" = true ]; then
             done
         fi
         echo "EOF"
+        echo "sudo systemctl daemon-reload"
         echo ""
         echo "2. Create directories and mount all:"
         echo -n "sudo mkdir -p /opt/network-setup"
@@ -294,10 +321,16 @@ if [ "$VM_EXISTS" = true ]; then
 
         # Show mount status
         echo ""
-        echo "📁 Mount Instructions (persistent across reboots):"
+        if [ "$MOUNTS_CHANGED" = false ] && [ "$VM_EXISTS" = true ]; then
+            echo "📁 Mount Instructions (run if not already configured):"
+        else
+            echo "📁 Mount Instructions (persistent across reboots):"
+        fi
         echo ""
-        echo "1. Add all mounts to fstab:"
+        echo "1. Set up fstab (replaces any previous agent-virt mounts):"
+        echo "sudo sed -i '/# agent-virt mounts/,\$d' /etc/fstab"
         echo "sudo tee -a /etc/fstab << 'EOF'"
+        echo "# agent-virt mounts"
         echo "network-setup /opt/network-setup virtiofs defaults 0 0"
         if [ ${#MOUNTS[@]} -gt 0 ]; then
             for mount in "${MOUNTS[@]}"; do
@@ -306,6 +339,7 @@ if [ "$VM_EXISTS" = true ]; then
             done
         fi
         echo "EOF"
+        echo "sudo systemctl daemon-reload"
         echo ""
         echo "2. Create directories and mount all:"
         echo -n "sudo mkdir -p /opt/network-setup"
@@ -520,18 +554,25 @@ fi
 echo ""
 echo "2. Inside the VM (login as vm/vm):"
 echo ""
-echo "   Copy-paste this command to set up persistent mounts:"
+if [ "$MOUNTS_CHANGED" = false ] && [ "$VM_EXISTS" = true ]; then
+    echo "   Copy-paste this command (if not already configured):"
+else
+    echo "   Copy-paste this command to set up persistent mounts:"
+fi
 echo ""
-echo "   # Add all mounts to fstab (persistent across reboots)"
-echo "   sudo tee -a /etc/fstab << 'EOF'"
-echo "   network-setup /opt/network-setup virtiofs defaults 0 0"
+echo "   # Set up fstab (replaces any previous agent-virt mounts)"
+echo "sudo sed -i '/# agent-virt mounts/,\$d' /etc/fstab"
+echo "sudo tee -a /etc/fstab << 'EOF'"
+echo "# agent-virt mounts"
+echo "network-setup /opt/network-setup virtiofs defaults 0 0"
 if [ ${#MOUNTS[@]} -gt 0 ]; then
     for mount in "${MOUNTS[@]}"; do
         IFS=':' read -r src dst <<< "$mount"
-        echo "   $dst /opt/$dst virtiofs defaults 0 0"
+        echo "$dst /opt/$dst virtiofs defaults 0 0"
     done
 fi
-echo "   EOF"
+echo "EOF"
+echo "sudo systemctl daemon-reload"
 echo ""
 echo "   # Create directories and mount all"
 echo -n "   sudo mkdir -p /opt/network-setup"

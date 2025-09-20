@@ -70,12 +70,15 @@ UBUNTU_ISO=~/Downloads/ubuntu-24.04.3-desktop-amd64.iso ./create-base-image.sh ~
 After VM starts (login as vm/vm):
 
 ```bash
-# Add all mounts to fstab (persistent across reboots)
+# Set up fstab (replaces any previous agent-virt mounts)
+sudo sed -i '/# agent-virt mounts/,$d' /etc/fstab
 sudo tee -a /etc/fstab << 'EOF'
+# agent-virt mounts
 network-setup /opt/network-setup virtiofs defaults 0 0
 myapp /opt/myapp virtiofs defaults 0 0
 shared /opt/shared virtiofs defaults 0 0
 EOF
+sudo systemctl daemon-reload
 
 # Create directories and mount all
 sudo mkdir -p /opt/network-setup /opt/myapp /opt/shared
@@ -153,7 +156,9 @@ This configures the network resilience layer shown in the architecture diagram.
 ### Persistent Mounts
 
 Mounts are configured to persist across VM reboots by default:
-- All mount instructions add entries to `/etc/fstab`
+- Mount instructions use a marker system in `/etc/fstab`
+- The `# agent-virt mounts` marker allows clean replacement of mount entries
+- When mounts change, all entries after the marker are removed and new ones added
 - Use `sudo mount -a` to mount all configured filesystems
 - Mounts survive VM restarts automatically
 
