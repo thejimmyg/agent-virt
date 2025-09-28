@@ -1,34 +1,39 @@
 #!/bin/bash
 set -e
 
-echo "🚀 Create Ubuntu 24.04 Base Image"
+echo "🚀 Agent Virt - Create Base Image"
 echo "================================="
 echo ""
 
 # Check arguments
 if [ $# -ne 1 ]; then
-    echo "Usage: $0 BASE_IMAGE_PATH"
+    echo "Usage: $0 BASE_IMAGE_NAME"
     echo ""
     echo "Examples:"
-    echo "  UBUNTU_ISO=~/Downloads/ubuntu-24.04.3-desktop-amd64.iso ./create-base-image.sh base-ubuntu24.qcow2"
-    echo "  UBUNTU_ISO=~/Downloads/ubuntu-24.04.3-desktop-amd64.iso ./create-base-image.sh /path/to/base-minimal.qcow2"
+    echo "  UBUNTU_ISO=~/Downloads/ubuntu-24.04.3-desktop-amd64.iso ./create-base-image.sh base-ubuntu24"
+    echo "  UBUNTU_ISO=~/Downloads/ubuntu-24.04.3-desktop-amd64.iso ./create-base-image.sh minimal"
     echo ""
     echo "This script creates a base VM image that includes:"
-    echo "  - Fresh Ubuntu 24.04 installation"
+    echo "  - Fresh OS installation"
     echo "  - Basic system configuration"
     echo "  - Network resilience setup"
     echo ""
-    echo "The base image can then be used with local-vm.sh to create fast test VMs."
+    echo "The base image can then be used with create.sh to create fast test VMs."
+    echo ""
+    echo "Environment variables:"
+    echo "  AGENT_VIRT_DIR: Directory for VM storage (default: ~/vms/agent-virt)"
     exit 1
 fi
 
-BASE_IMAGE_PATH="$1"
+BASE_IMAGE_NAME="$1"
 
-# Validate base image path
-if [[ ! "$BASE_IMAGE_PATH" =~ \.qcow2$ ]]; then
-    echo "Error: Base image path must end with .qcow2"
-    exit 1
-fi
+# Set up directory structure
+AGENT_VIRT_DIR="${AGENT_VIRT_DIR:-$HOME/vms/agent-virt}"
+BASE_DIR="$AGENT_VIRT_DIR/base"
+BASE_IMAGE_PATH="$BASE_DIR/${BASE_IMAGE_NAME}.qcow2"
+
+# Create directories
+mkdir -p "$BASE_DIR"
 
 # Configuration
 VM_NAME="base-builder"
@@ -135,9 +140,7 @@ if ! groups | grep -q libvirt; then
 fi
 
 # Check disk space (need at least 25GB free)
-TARGET_DIR=$(dirname "$BASE_IMAGE_PATH")
-mkdir -p "$TARGET_DIR"
-AVAILABLE_SPACE=$(df "$TARGET_DIR" --output=avail -B1 | tail -1)
+AVAILABLE_SPACE=$(df "$BASE_DIR" --output=avail -B1 | tail -1)
 REQUIRED_SPACE=$((25 * 1024 * 1024 * 1024))  # 25GB in bytes
 
 if [ "$AVAILABLE_SPACE" -lt "$REQUIRED_SPACE" ]; then
@@ -185,11 +188,11 @@ echo "  Name:     $VM_NAME"
 echo "  Memory:   ${VM_MEMORY}MB"
 echo "  CPUs:     $VM_VCPUS"
 echo "  Disk:     ${VM_DISK_SIZE}GB"
-echo "  Base Image: $1"
+echo "  Base Image: $BASE_IMAGE_PATH"
 echo ""
 echo "🚀 Next Steps:"
 echo ""
-echo "1. Install Ubuntu (virt-viewer should open automatically):"
+echo "1. Install OS (virt-viewer should open automatically):"
 
 # Launch virt-viewer
 log_info "Launching virt-viewer to connect to VM..."
@@ -215,15 +218,15 @@ else
 fi
 
 echo ""
-echo "2. During Ubuntu installation:"
+echo "2. During OS installation:"
 echo "   - Create user: username 'vm', password 'vm', computer name 'vm'"
 echo "   - Login as user 'vm' with password 'vm'"
 echo ""
 echo "3. After you shutdown your base image will be ready at:"
-echo "   $1"
+echo "   $BASE_IMAGE_PATH"
 echo ""
 echo "4. Create test VMs from this base:"
-echo "   ./local-vm.sh \"$BASE_IMAGE_PATH\" test.qcow2 --mount /path/to/project:project"
+echo "   ./create.sh $BASE_IMAGE_NAME /path/to/read /path/to/write test-vm"
 echo ""
 echo "💡 Helpful Commands During Setup:"
 echo "  VM Status:       virsh list --all"
@@ -233,7 +236,7 @@ echo "  GUI Console:     virt-viewer $VM_NAME"
 echo ""
 
 # Wait for the installation process
-echo "⏳ Waiting for Ubuntu installation and setup..."
+echo "⏳ Waiting for OS installation and setup..."
 echo "   This VM will be removed automatically after you shut it down."
 echo "   The base image will remain at: $BASE_IMAGE_PATH"
 echo ""
@@ -277,16 +280,16 @@ echo ""
 echo "🎉 Base Image Creation Complete!"
 echo "================================="
 echo ""
-log_success "Base image created: $1"
+log_success "Base image created: $BASE_IMAGE_PATH"
 echo ""
 echo "📋 What's included in this base image:"
-echo "  ✅ Fresh Ubuntu 24.04 installation"
+echo "  ✅ Fresh OS installation"
 echo "  ✅ User 'vm' with password 'vm'"
 echo "  ✅ Basic system configuration"
 echo ""
 echo "🚀 Create test VMs from this base:"
-echo "  ./local-vm.sh \"$BASE_IMAGE_PATH\" test-session1.qcow2"
-echo "  ./local-vm.sh \"$BASE_IMAGE_PATH\" test-dev.qcow2 --mount /home/user/project:project"
+echo "  ./create.sh $BASE_IMAGE_NAME /path/to/read /path/to/write test-session1"
+echo "  ./create.sh $BASE_IMAGE_NAME /home/user/project /home/user/data test-dev"
 echo ""
 echo "💾 Base image size: $(du -h "$BASE_IMAGE_PATH" 2>/dev/null | cut -f1 || echo "N/A")"
 echo ""

@@ -1,8 +1,8 @@
-# agent-virt - Ubuntu VM Manager
+# Agent Virt - VM Manager
 
-A standalone tool for creating and managing Ubuntu 24.04 VMs with flexible directory mounting support. Perfect for testing applications in isolated environments with access to multiple host directories.
+A standalone tool for creating and managing VMs with fixed directory mounting. Perfect for testing applications in isolated environments with predictable access to read and write directories.
 
-The VM uses a multi-layered approach to handle network changes:
+The system uses a simplified, robust approach that eliminates manual mount configuration:
 
 ```
 ┌─────────────────────────────────────────┐
@@ -36,172 +36,190 @@ sudo usermod -a -G libvirt $USER
 # Log out and back in for group changes to take effect
 ```
 
-### 2. Setup Directory Structure
+### 2. Create Base Image
 
 ```bash
-# Create a directory for VM images (outside any git repos)
-mkdir -p ~/vms/agent-virt
-```
-
-### 3. Create Base Image
-
-```bash
-# Download Ubuntu 24.04 ISO first
+# Download your OS ISO first (e.g., Ubuntu 24.04)
 # Then create a base image (one-time setup, ~20 minutes)
-UBUNTU_ISO=~/Downloads/ubuntu-24.04.3-desktop-amd64.iso ./create-base-image.sh ~/vms/agent-virt/base-ubuntu24.qcow2
+UBUNTU_ISO=~/Downloads/ubuntu-24.04.3-desktop-amd64.iso ./create-base-image.sh base-ubuntu24
 
 # During installation: create user 'vm' with password 'vm'
 ```
 
-### 4. Create and Use Test VMs
+### 3. Create and Use VMs
 
 ```bash
-# Basic VM (no mounts)
-./local-vm.sh ~/vms/agent-virt/base-ubuntu24.qcow2 ~/vms/agent-virt/test-session1.qcow2
+# Create a new VM
+./create.sh base-ubuntu24 /home/user/read-data /home/user/write-data my-vm
 
-# VM with project mounts
-./local-vm.sh ~/vms/agent-virt/base-ubuntu24.qcow2 ~/vms/agent-virt/test-dev.qcow2 \
-  --mount /home/user/myproject:myapp \
-  --mount /data/shared:shared
+# Run the VM
+./run.sh my-vm
 ```
 
-### 5. Inside the VM
+### 4. Inside the VM
 
-After VM starts (login as vm/vm):
+After VM starts (login as vm/vm), run the setup script:
 
 ```bash
-# Set up fstab (replaces any previous agent-virt mounts)
-sudo sed -i '/# agent-virt mounts/,$d' /etc/fstab
-sudo tee -a /etc/fstab << 'EOF'
-# agent-virt mounts
-network-setup /opt/network-setup virtiofs defaults 0 0
-myapp /opt/myapp virtiofs defaults 0 0
-shared /opt/shared virtiofs defaults 0 0
-EOF
-sudo systemctl daemon-reload
-
-# Create directories and mount all
-sudo mkdir -p /opt/network-setup /opt/myapp /opt/shared
-sudo mount -a
-
-# Run network setup
-sudo /opt/network-setup/network-setup.sh
+sudo /opt/setup/setup.sh
 ```
 
-## Architecture & Safety
+This automatically:
+- Configures persistent mounts at `/opt/read`, `/opt/write`, `/opt/setup`
+- Sets up network resilience for WiFi changes
+- Enables clipboard sharing
+
+## Architecture & Design
 
 ### Design Principles
 
-- **Standalone Operation**: No git repository dependencies
-- **Multiple Mounts**: Mount any number of host directories into VMs
-- **Fast VM Creation**: Test VMs created in seconds from base images
+- **Simplified Interface**: Fixed mount points eliminate configuration complexity
+- **Predictable Mounts**: Always `/opt/read` (read-only) and `/opt/write` (read-write)
+- **Fast VM Creation**: VMs created in seconds from base images
 - **Network Resilience**: NAT networking survives WiFi/network changes
-- **Local Storage**: All VM images stored in your chosen directory
+- **Organized Storage**: Separate base and runtime VM storage
 
-### Safety Features
+### Directory Structure
 
-- **Image Isolation**: Keep VM images outside mounted directories to prevent recursion
-- **Explicit Paths**: All mount paths must be explicitly specified
-- **Permission Preservation**: virtiofs maintains host file permissions
-- **Non-destructive**: Test VMs are copies, base images remain pristine
+```
+$AGENT_VIRT_DIR/          # Default: ~/vms/agent-virt
+├── base/                 # Base images
+│   └── base-ubuntu24.qcow2
+└── run/                  # Runtime VMs
+    ├── my-vm.qcow2
+    └── my-vm.mount       # Mount configuration
+```
+
+### Environment Variables
+
+- `AGENT_VIRT_DIR`: VM storage directory (default: `~/vms/agent-virt`)
 
 ### Two-Stage Workflow
 
-1. **Base Images** (`base-*.qcow2`): Created once with full Ubuntu installation
-2. **Test VMs** (`test-*.qcow2`): Fast copies from base images for testing
+1. **Base Images**: Created once with full OS installation (`create-base-image.sh`)
+2. **VM Creation**: Fast copies from base images with specific mounts (`create.sh`)
+3. **VM Usage**: Simple execution with automatic mount setup (`run`)
 
-### VM Recreation on Mount Changes
+## Commands
 
-When you run `local-vm.sh` with different `--mount` options:
+### create-base-image.sh
 
-- **Disk preserved**: Your VM's disk file (`.qcow2`) and all data is kept
-- **VM recreated**: The VM definition is destroyed and recreated with new mounts
-- **Clean state**: Running processes are lost, but installed software and files remain
-- **Predictable mounts**: Ensures exactly the mounts you specify are attached
+Creates a new base image from an OS ISO.
 
-This design prioritizes reliability and simplicity over preserving temporary VM state.
-
-## Mount System
-
-The `--mount` flag uses `SRC:DST` format:
-- `SRC`: Absolute path on the host system
-- `DST`: Simple name (no slashes) - mounts to `/opt/DST` in VM
-
-Examples:
 ```bash
-# Initial VM with project mount
-./local-vm.sh base.qcow2 test.qcow2 \
-  --mount /home/user/project:myproject
+# Basic usage
+UBUNTU_ISO=~/Downloads/ubuntu-24.04.3-desktop-amd64.iso ./create-base-image.sh base-ubuntu24
 
-# Later, change mounts (VM will be recreated)
-./local-vm.sh base.qcow2 test.qcow2 \
-  --mount /home/user/project:myproject \
-  --mount /data/shared:shared \
-  --mount /opt/configs:configs
-
-# Access in VM at:
-# /opt/myproject
-# /opt/shared
-# /opt/configs
+# Creates: $AGENT_VIRT_DIR/base/base-ubuntu24.qcow2
 ```
 
-**Note**: Changing mounts recreates the VM (preserving disk data) to ensure clean mount state.
+### create.sh
 
-## Network Setup
+Creates a new VM from a base image with specific read/write directories.
 
-Every VM automatically has network-setup.sh available. The setup commands shown by the script include both the network setup and your custom mounts in a single copy-pastable block.
+```bash
+# Basic usage (4 CPUs, 6GB RAM)
+./create.sh base-ubuntu24 /path/to/read /path/to/write vm-name
 
-This configures the network resilience layer shown in the architecture diagram.
+# Custom resources
+./create.sh --cpu 8 --ram 12 base-ubuntu24 /path/to/read /path/to/write vm-name
 
-### Persistent Mounts
+# Creates:
+#   $AGENT_VIRT_DIR/run/vm-name.qcow2
+#   $AGENT_VIRT_DIR/run/vm-name.mount
+```
 
-Mounts are configured to persist across VM reboots by default:
-- Mount instructions use a marker system in `/etc/fstab`
-- The `# agent-virt mounts` marker allows clean replacement of mount entries
-- When mounts change, all entries after the marker are removed and new ones added
-- Use `sudo mount -a` to mount all configured filesystems
-- Mounts survive VM restarts automatically
+Arguments:
+- `BASE_NAME`: Name of base image (without .qcow2)
+- `READ_DIR`: Host directory mounted read-only at `/opt/read`
+- `WRITE_DIR`: Host directory mounted read-write at `/opt/write`
+- `VM_NAME`: Name for new VM (without .qcow2)
 
-### What if Host Paths Move?
+Options:
+- `--cpu N`: Number of CPUs (default: 4)
+- `--ram N`: RAM in GB (default: 6)
 
-If a host directory is moved or deleted:
-- **VM boots normally** - mount failures don't prevent boot
-- **Affected mount unavailable** - only that specific mount fails
-- **Other mounts work fine** - unaffected mounts continue to function
-- **To fix**: Update mount configuration and recreate VM with new paths
+### run
+
+Starts and connects to an existing VM.
+
+```bash
+./run.sh vm-name
+```
+
+Automatically:
+- Starts the VM if stopped
+- Launches virt-viewer for GUI access
+- Shows setup instructions
+
+## Fixed Mount Points
+
+Every VM has three mount points:
+
+- `/opt/setup` - Setup scripts (read-only)
+- `/opt/read` - Your read directory (read-only)
+- `/opt/write` - Your write directory (read-write)
+
+No manual mount configuration needed - the `setup.sh` script handles everything.
 
 ## VM Management
 
 ### Essential Commands
 
 ```bash
-# Start/Stop VMs
-virsh start test-vm
-virsh shutdown test-vm
-virsh destroy test-vm        # Force stop
+# VM lifecycle
+./run.sh vm-name              # Start and connect to VM
+virsh shutdown vm-name     # Graceful shutdown
+virsh destroy vm-name      # Force stop
 
-# View VMs
-virsh list --all
-virt-viewer test-vm          # GUI console
-
-# Clean up
-virsh undefine test-vm       # Remove VM definition
-rm test-vm.qcow2            # Remove disk image
+# Status and cleanup
+virsh list --all           # List all VMs
+virt-viewer vm-name        # GUI console
+virsh undefine vm-name     # Remove VM definition
+rm $AGENT_VIRT_DIR/run/vm-name.qcow2  # Remove disk image
 ```
 
-## Tips
+### Examples
 
-- **Performance**: Allocate at least 4GB RAM for good performance
-- **Display**: Adjust resolution inside VM using Ubuntu's display settings
-- **Clipboard**: Works automatically via spice-vdagent
-- **Persistence**: Test VMs preserve state between restarts until deleted
+```bash
+# Create base image
+UBUNTU_ISO=~/Downloads/ubuntu-24.04.3-desktop-amd64.iso ./create-base-image.sh base-ubuntu24
+
+# Development VM
+./create.sh base-ubuntu24 /home/user/docs /home/user/projects dev-vm
+./run.sh dev-vm
+
+# Testing VM with more resources
+./create.sh --cpu 8 --ram 12 base-ubuntu24 /data/test-inputs /data/test-outputs test-vm
+./run.sh test-vm
+
+# Inside any VM (after login as vm/vm):
+sudo /opt/setup/setup.sh
+```
+
+## Safety Features
+
+- **Image Isolation**: Base images are read-only, VMs are copies
+- **Explicit Paths**: All mount paths must be explicitly specified
+- **Permission Preservation**: virtiofs maintains host file permissions
+- **Non-destructive**: VM disk images persist independently
 
 ## Troubleshooting
 
 **VM won't start**: Check `virsh list --all` and `sudo journalctl -u libvirtd -n 50`
 
-**Mount not working**: Ensure virtiofsd is installed and the host path exists
+**Mount not working**: Ensure host directories exist and run `sudo /opt/setup/setup.sh` in VM
 
 **Network issues**: Wait 10-15 seconds after network change, or `sudo systemctl restart NetworkManager` in VM
 
-**Permission denied**: VM user needs appropriate permissions for mounted directories
+**Permission denied**: Ensure VM user has appropriate permissions for mounted directories
+
+## Migration from Old System
+
+If you have VMs created with the old `local-vm.sh` system:
+
+1. Stop the old VM: `virsh destroy vm-name`
+2. Remove the VM definition: `virsh undefine vm-name`
+3. Recreate with new system: `./create.sh base-name /read/path /write/path vm-name`
+
+The new system is much simpler and eliminates the brittle mount configuration process.
