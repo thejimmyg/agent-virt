@@ -223,3 +223,20 @@ If you have VMs created with the old `local-vm.sh` system:
 3. Recreate with new system: `./create.sh base-name /read/path /write/path vm-name`
 
 The new system is much simpler and eliminates the brittle mount configuration process.
+
+## Resize
+
+With and Ubuntu 24.04 VM I find I can do this on the host (make sure the VM isn't running):
+
+```
+sudo qemu-img resize ~/vms/agent-virt/run/simpler.qcow2 +10G
+```
+
+And this on the VM:
+
+```
+sudo growpart /dev/vda 2
+sudo resize2fs /dev/vda2
+```
+
+But you'll need to use the correct partitions for you.
