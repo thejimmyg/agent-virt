@@ -14,10 +14,11 @@ if [ $# -ne 1 ]; then
     echo "  UBUNTU_ISO=~/Downloads/ubuntu-24.04.3-desktop-amd64.iso ./create-base-image.sh minimal"
     echo ""
     echo "This script creates a base VM image that includes:"
-    echo "  - Fresh OS installation"
+    echo "  - Fresh OS installation (30GB disk recommended)"
     echo "  - Basic system configuration"
     echo "  - Network resilience setup"
     echo ""
+    echo "During OS install: Use single partition (not LVM) for best performance."
     echo "The base image can then be used with create.sh to create fast test VMs."
     echo ""
     echo "Environment variables:"
@@ -39,7 +40,7 @@ mkdir -p "$BASE_DIR"
 VM_NAME="base-builder"
 VM_MEMORY="4096"
 VM_VCPUS="2"
-VM_DISK_SIZE="20"
+VM_DISK_SIZE="30"
 
 # Colors for output
 RED='\033[0;31m'

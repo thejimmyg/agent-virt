@@ -1,242 +1,148 @@
-# Agent Virt - VM Manager
+# Agent Virt - Safe AI Agent Environment
 
-A standalone tool for creating and managing VMs with fixed directory mounting. Perfect for testing applications in isolated environments with predictable access to read and write directories.
+A VM manager designed to safely run AI agents like Claude Code in isolated environments with controlled file access.
 
-The system uses a simplified, robust approach that eliminates manual mount configuration:
+## Why Use Agent Virt?
 
-```
-┌─────────────────────────────────────────┐
-│            Host System                  │
-│                                         │
-│  WiFi Changes ←→ NetworkManager         │
-│       ↓                                 │
-│  libvirt NAT Network (virbr0)           │
-│       ↓                                 │
-├─────────────────────────────────────────┤
-│            VM Guest                     │
-│                                         │
-│  virtio NIC (DHCP from libvirt)         │
-│       ↓                                 │
-│  systemd-resolved (DNS caching)         │
-│       ↓                                 │
-│  NetworkManager (resilient config)      │
-│       ↓                                 │
-│  Applications (e.g. podman containers)  │
-└─────────────────────────────────────────┘
-```
+AI agents can execute code, modify files, and make system changes. Agent Virt provides:
+
+- **Safe isolation**: Agents run in VMs, not your host system
+- **Controlled access**: Only specified directories are accessible
+- **Easy setup**: VMs created in seconds with predictable mounts
+- **Full resources**: VMs can use all available CPU/RAM when needed
 
 ## Quick Start
 
 ### 1. Install Dependencies
-
 ```bash
 sudo apt update
-sudo apt install -y virt-manager libvirt-daemon-system qemu-kvm virtiofsd virt-viewer
+sudo apt install -y virt-manager libvirt-daemon-system qemu-kvm virt-viewer
 sudo usermod -a -G libvirt $USER
-# Log out and back in for group changes to take effect
+# Log out and back in
 ```
 
 ### 2. Create Base Image
-
 ```bash
-# Download your OS ISO first (e.g., Ubuntu 24.04)
-# Then create a base image (one-time setup, ~20 minutes)
+# Download OS ISO, then create base (one-time, ~20 minutes)
 UBUNTU_ISO=~/Downloads/ubuntu-24.04.3-desktop-amd64.iso ./create-base-image.sh base-ubuntu24
-
-# During installation: create user 'vm' with password 'vm'
+# During install: create user 'vm' with password 'vm', use single partition, 30GB recommended
 ```
 
-### 3. Create and Use VMs
-
+### 3. Create Agent VM
 ```bash
-# Create a new VM
-./create.sh base-ubuntu24 /home/user/read-data /home/user/write-data my-vm
+# Create VM with controlled directory access
+./create.sh base-ubuntu24 /safe/read/path /safe/write/path agent-vm
 
-# Run the VM
-./run.sh my-vm
+# Start VM
+./run.sh agent-vm
 ```
 
-### 4. Inside the VM
-
-After VM starts (login as vm/vm), run the setup script:
-
+### 4. Setup Inside VM
 ```bash
+# Login as vm/vm, then run:
 sudo /opt/setup/setup.sh
 ```
 
-This automatically:
-- Configures persistent mounts at `/opt/read`, `/opt/write`, `/opt/setup`
-- Sets up network resilience for WiFi changes
-- Enables clipboard sharing
+Your directories are now mounted at:
+- `/opt/read` - Read-only access to safe files
+- `/opt/write` - Write access for agent outputs
+- `/opt/setup` - Setup scripts
 
-## Architecture & Design
+## Usage Patterns
 
-### Design Principles
+### Safe Agent Development
+```bash
+# Create isolated environment for Claude Code
+./create.sh base-ubuntu24 /home/user/safe-projects /home/user/agent-outputs claude-vm
+./run.sh claude-vm
 
-- **Simplified Interface**: Fixed mount points eliminate configuration complexity
-- **Predictable Mounts**: Always `/opt/read` (read-only) and `/opt/write` (read-write)
-- **Fast VM Creation**: VMs created in seconds from base images
-- **Network Resilience**: NAT networking survives WiFi/network changes
-- **Organized Storage**: Separate base and runtime VM storage
-
-### Directory Structure
-
-```
-$AGENT_VIRT_DIR/          # Default: ~/vms/agent-virt
-├── base/                 # Base images
-│   └── base-ubuntu24.qcow2
-└── run/                  # Runtime VMs
-    ├── my-vm.qcow2
-    └── my-vm.mount       # Mount configuration
+# Inside VM: install tools, run Claude Code, develop safely
+# Agent can only access /opt/read and /opt/write
 ```
 
-### Environment Variables
+### Resource Scaling
+```bash
+# Give agent more resources for complex tasks
+./run.sh --cpu 16 --ram 16 claude-vm
 
-- `AGENT_VIRT_DIR`: VM storage directory (default: `~/vms/agent-virt`)
+# Scale back for lighter work
+./run.sh --cpu 4 --ram 4 claude-vm
+```
 
-### Two-Stage Workflow
+### Container Isolation
+```bash
+# Inside VM: run agent in containers for extra isolation
+podman run -v /opt/read:/data:ro -v /opt/write:/output your-agent-image
+# Containers automatically inherit VM resource limits
+```
 
-1. **Base Images**: Created once with full OS installation (`create-base-image.sh`)
-2. **VM Creation**: Fast copies from base images with specific mounts (`create.sh`)
-3. **VM Usage**: Simple execution with automatic mount setup (`run`)
+## Key Features
+
+- **Instant VMs**: Create new agent environments in seconds
+- **Live resource updates**: Adjust CPU/RAM without restarting
+- **Predictable mounts**: Always `/opt/read`, `/opt/write`, `/opt/setup`
+- **Network isolation**: VMs use NAT, protected from host network
+- **Easy cleanup**: Delete VMs without affecting host
+- **Optimized performance**: VirtIO drivers and disk caching for speed
 
 ## Commands
 
-### create-base-image.sh
-
-Creates a new base image from an OS ISO.
-
+### create.sh - Create new agent VM
 ```bash
-# Basic usage
-UBUNTU_ISO=~/Downloads/ubuntu-24.04.3-desktop-amd64.iso ./create-base-image.sh base-ubuntu24
-
-# Creates: $AGENT_VIRT_DIR/base/base-ubuntu24.qcow2
+./create.sh [--cpu N] [--ram N] BASE_NAME READ_DIR WRITE_DIR VM_NAME
 ```
 
-### create.sh
-
-Creates a new VM from a base image with specific read/write directories.
-
+### run.sh - Start and manage VM
 ```bash
-# Basic usage (4 CPUs, 6GB RAM)
-./create.sh base-ubuntu24 /path/to/read /path/to/write vm-name
-
-# Custom resources
-./create.sh --cpu 8 --ram 12 base-ubuntu24 /path/to/read /path/to/write vm-name
-
-# Creates:
-#   $AGENT_VIRT_DIR/run/vm-name.qcow2
-#   $AGENT_VIRT_DIR/run/vm-name.mount
+./run.sh [--cpu N] [--ram N] VM_NAME
 ```
 
-Arguments:
-- `BASE_NAME`: Name of base image (without .qcow2)
-- `READ_DIR`: Host directory mounted read-only at `/opt/read`
-- `WRITE_DIR`: Host directory mounted read-write at `/opt/write`
-- `VM_NAME`: Name for new VM (without .qcow2)
-
-Options:
-- `--cpu N`: Number of CPUs (default: 4)
-- `--ram N`: RAM in GB (default: 6)
-
-### run
-
-Starts and connects to an existing VM.
-
+### VM Management
 ```bash
-./run.sh vm-name
+virsh list --all                    # List VMs
+virsh shutdown vm-name             # Shutdown (or use VM's shutdown)
+virsh undefine vm-name             # Remove VM definition
+rm ~/vms/agent-virt/run/vm-name.*  # Remove VM files
 ```
 
-Automatically:
-- Starts the VM if stopped
-- Launches virt-viewer for GUI access
-- Shows setup instructions
+## Safety by Design
 
-## Fixed Mount Points
+- **File isolation**: Agents only access specified directories
+- **VM isolation**: Host system protected from agent actions
+- **Resource limits**: VMs use shared resources, can't monopolize host
+- **Easy rollback**: Snapshot or recreate VMs as needed
+- **Container ready**: Run agents in containers within VMs for layered isolation
 
-Every VM has three mount points:
-
-- `/opt/setup` - Setup scripts (read-only)
-- `/opt/read` - Your read directory (read-only)
-- `/opt/write` - Your write directory (read-write)
-
-No manual mount configuration needed - the `setup.sh` script handles everything.
-
-## VM Management
-
-### Essential Commands
-
-```bash
-# VM lifecycle
-./run.sh vm-name              # Start and connect to VM
-virsh shutdown vm-name     # Graceful shutdown
-virsh destroy vm-name      # Force stop
-
-# Status and cleanup
-virsh list --all           # List all VMs
-virt-viewer vm-name        # GUI console
-virsh undefine vm-name     # Remove VM definition
-rm $AGENT_VIRT_DIR/run/vm-name.qcow2  # Remove disk image
+## Directory Structure
 ```
-
-### Examples
-
-```bash
-# Create base image
-UBUNTU_ISO=~/Downloads/ubuntu-24.04.3-desktop-amd64.iso ./create-base-image.sh base-ubuntu24
-
-# Development VM
-./create.sh base-ubuntu24 /home/user/docs /home/user/projects dev-vm
-./run.sh dev-vm
-
-# Testing VM with more resources
-./create.sh --cpu 8 --ram 12 base-ubuntu24 /data/test-inputs /data/test-outputs test-vm
-./run.sh test-vm
-
-# Inside any VM (after login as vm/vm):
-sudo /opt/setup/setup.sh
+~/vms/agent-virt/
+├── base/                    # Base OS images
+│   └── base-ubuntu24.qcow2
+└── run/                     # Agent VMs
+    ├── claude-vm.qcow2
+    ├── agent-vm.qcow2
+    └── *.mount              # Mount configurations
 ```
-
-## Safety Features
-
-- **Image Isolation**: Base images are read-only, VMs are copies
-- **Explicit Paths**: All mount paths must be explicitly specified
-- **Permission Preservation**: virtiofs maintains host file permissions
-- **Non-destructive**: VM disk images persist independently
 
 ## Troubleshooting
 
 **VM won't start**: Check `virsh list --all` and `sudo journalctl -u libvirtd -n 50`
 
-**Mount not working**: Ensure host directories exist and run `sudo /opt/setup/setup.sh` in VM
+**Mounts not working**: Run `sudo /opt/setup/setup.sh` inside VM
 
-**Network issues**: Wait 10-15 seconds after network change, or `sudo systemctl restart NetworkManager` in VM
+**Need more resources**: Use `./run.sh --cpu N --ram N vm-name` (live update)
 
-**Permission denied**: Ensure VM user has appropriate permissions for mounted directories
+**Recreate for live updates**: Old VMs need recreation for dynamic resource support
 
-## Migration from Old System
+**Slow disk performance**: Recreate VM for optimized VirtIO disk drivers and caching
 
-If you have VMs created with the old `local-vm.sh` system:
+## Migration from Older Versions
 
-1. Stop the old VM: `virsh destroy vm-name`
-2. Remove the VM definition: `virsh undefine vm-name`
-3. Recreate with new system: `./create.sh base-name /read/path /write/path vm-name`
-
-The new system is much simpler and eliminates the brittle mount configuration process.
-
-## Resize
-
-With and Ubuntu 24.04 VM I find I can do this on the host (make sure the VM isn't running):
-
-```
-sudo qemu-img resize ~/vms/agent-virt/run/simpler.qcow2 +10G
+If you have existing VMs without live update support:
+```bash
+virsh shutdown vm-name
+virsh undefine vm-name  # Keeps disk
+./create.sh base /read/path /write/path vm-name  # Recreate with new features
 ```
 
-And this on the VM:
-
-```
-sudo growpart /dev/vda 2
-sudo resize2fs /dev/vda2
-```
-
-But you'll need to use the correct partitions for you.
+The disk is preserved and reused automatically.

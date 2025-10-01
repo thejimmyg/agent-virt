@@ -1,13 +1,11 @@
 #!/bin/bash
 set -e
 
-echo "🚀 Agent Virt - Create VM from Base Image"
-echo "========================================="
-echo ""
 
-# Default values
-DEFAULT_CPU=4
-DEFAULT_RAM=6144  # 6GB in MB
+# Default values - use all available system resources
+DEFAULT_CPU=$(nproc)
+DEFAULT_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+DEFAULT_RAM=$((DEFAULT_RAM_KB / 1024))  # Convert KB to MB
 AGENT_VIRT_DIR="${AGENT_VIRT_DIR:-$HOME/vms/agent-virt}"
 
 # Function to show usage
@@ -21,12 +19,18 @@ show_usage() {
     echo "  VM_NAME     Name for the new VM (without .qcow2)"
     echo ""
     echo "Options:"
-    echo "  --cpu N     Number of CPUs (default: $DEFAULT_CPU)"
-    echo "  --ram N     RAM in GB (default: $((DEFAULT_RAM/1024)))"
+    echo "  --cpu N     Number of CPUs (default: $DEFAULT_CPU - all available)"
+    echo "  --ram N     RAM in GB (default: $((DEFAULT_RAM/1024))GB - all available)"
     echo ""
     echo "Examples:"
     echo "  ./create.sh base-ubuntu24 /home/user/docs /home/user/projects dev-vm"
     echo "  ./create.sh --cpu 8 --ram 8 base-ubuntu24 /data/read /data/write test-vm"
+    echo ""
+    echo "Notes:"
+    echo "  - CPU/RAM are shared resources with the host (not dedicated)"
+    echo "  - VMs support live CPU/memory updates via ./run.sh"
+    echo "  - Recommended: 30GB disk, single partition during OS install"
+    echo "  - Use ./run.sh to dynamically adjust resources later"
     echo ""
     echo "Environment variables:"
     echo "  AGENT_VIRT_DIR: Directory for VM storage (default: ~/vms/agent-virt)"
@@ -50,16 +54,16 @@ while true; do
     case "$1" in
         --cpu)
             VM_VCPUS="$2"
-            if ! [[ "$VM_VCPUS" =~ ^[0-9]+$ ]] || [ "$VM_VCPUS" -lt 1 ] || [ "$VM_VCPUS" -gt 32 ]; then
-                echo "Error: CPU count must be a number between 1 and 32"
+            if ! [[ "$VM_VCPUS" =~ ^[0-9]+$ ]] || [ "$VM_VCPUS" -lt 1 ] || [ "$VM_VCPUS" -gt 128 ]; then
+                echo "Error: CPU count must be a number between 1 and 128"
                 exit 1
             fi
             shift 2
             ;;
         --ram)
             RAM_GB="$2"
-            if ! [[ "$RAM_GB" =~ ^[0-9]+$ ]] || [ "$RAM_GB" -lt 1 ] || [ "$RAM_GB" -gt 64 ]; then
-                echo "Error: RAM must be a number between 1 and 64 GB"
+            if ! [[ "$RAM_GB" =~ ^[0-9]+$ ]] || [ "$RAM_GB" -lt 1 ] || [ "$RAM_GB" -gt 256 ]; then
+                echo "Error: RAM must be a number between 1 and 256 GB"
                 exit 1
             fi
             VM_MEMORY=$((RAM_GB * 1024))
@@ -206,14 +210,20 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SETUP_DIR="$SCRIPT_DIR/setup"
 
+# Show warning if using all memory
+if [ "$VM_MEMORY" -ge "$((DEFAULT_RAM * 95 / 100))" ]; then
+    log_warning "Allocating ${VM_MEMORY}MB (~100% of system RAM)"
+    log_info "Note: Memory is shared - the host will manage allocation"
+fi
+
 # Create VM
 log_info "Creating VM with ${VM_MEMORY}MB RAM, ${VM_VCPUS} CPUs..."
 
 virt-install \
     --name "$VM_NAME" \
     --ram "$VM_MEMORY" \
-    --vcpus "$VM_VCPUS" \
-    --disk "path=$VM_IMAGE_PATH,format=qcow2" \
+    --vcpus "$VM_VCPUS,maxvcpus=128" \
+    --disk "path=$VM_IMAGE_PATH,format=qcow2,bus=virtio,cache=writeback,io=threads" \
     --os-variant ubuntu24.04 \
     --network network=default \
     --graphics spice,listen=127.0.0.1 \
@@ -222,6 +232,7 @@ virt-install \
     --console pty,target_type=serial \
     --noautoconsole \
     --memorybacking source.type=memfd,access.mode=shared \
+    --memballoon model=virtio \
     --boot hd
 
 if [ $? -eq 0 ]; then
@@ -312,10 +323,6 @@ fi
 rm -f "$MOUNT_XML"
 
 echo ""
-echo "========================================"
-echo "  VM Creation Complete!"
-echo "========================================"
-echo ""
 echo "📋 VM Configuration:"
 echo "  Name:        $VM_NAME"
 echo "  Memory:      ${VM_MEMORY}MB"
@@ -328,16 +335,19 @@ echo ""
 echo "🚀 VM is ready!"
 echo ""
 echo "Connect to VM:"
-echo "  ./run.sh $VM_NAME"
+echo "  ./run.sh $VM_NAME                    # Use current settings"
+echo "  ./run.sh --cpu 4 --ram 4 $VM_NAME   # Adjust resources dynamically"
 echo ""
 echo "Or manually:"
 echo "  virt-viewer $VM_NAME"
 echo "  virsh console $VM_NAME"
 echo ""
 echo "💡 Helpful Commands:"
-echo "  Start VM:        virsh start $VM_NAME"
-echo "  Stop VM:         virsh shutdown $VM_NAME"
+echo "  Start VM:        virsh start $VM_NAME (or use ./run.sh)"
+echo "  Stop VM:         Shut down from within the VM"
 echo "  Force stop:      virsh destroy $VM_NAME"
 echo "  Delete VM:       virsh undefine $VM_NAME"
 echo "  Delete VM img:   rm \"$VM_IMAGE_PATH\""
+echo ""
+echo "📝 Note: CPU/RAM resources are shared with the host, not dedicated."
 echo ""
